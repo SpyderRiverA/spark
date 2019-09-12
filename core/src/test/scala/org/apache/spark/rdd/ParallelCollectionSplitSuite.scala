@@ -22,10 +22,11 @@ import scala.collection.immutable.NumericRange
 import org.scalacheck.Arbitrary._
 import org.scalacheck.Gen
 import org.scalacheck.Prop._
-import org.scalatest.FunSuite
 import org.scalatest.prop.Checkers
 
-class ParallelCollectionSplitSuite extends FunSuite with Checkers {
+import org.apache.spark.SparkFunSuite
+
+class ParallelCollectionSplitSuite extends SparkFunSuite with Checkers {
   test("one element per slice") {
     val data = Array(1, 2, 3)
     val slices = ParallelCollectionRDD.slice(data, 3)
@@ -100,7 +101,7 @@ class ParallelCollectionSplitSuite extends FunSuite with Checkers {
     val data = 1 until 100
     val slices = ParallelCollectionRDD.slice(data, 3)
     assert(slices.size === 3)
-    assert(slices.map(_.size).reduceLeft(_ + _) === 99)
+    assert(slices.map(_.size).sum === 99)
     assert(slices.forall(_.isInstanceOf[Range]))
   }
 
@@ -108,7 +109,7 @@ class ParallelCollectionSplitSuite extends FunSuite with Checkers {
     val data = 1 to 100
     val slices = ParallelCollectionRDD.slice(data, 3)
     assert(slices.size === 3)
-    assert(slices.map(_.size).reduceLeft(_ + _) === 100)
+    assert(slices.map(_.size).sum === 100)
     assert(slices.forall(_.isInstanceOf[Range]))
   }
 
@@ -201,7 +202,7 @@ class ParallelCollectionSplitSuite extends FunSuite with Checkers {
     val data = 1L until 100L
     val slices = ParallelCollectionRDD.slice(data, 3)
     assert(slices.size === 3)
-    assert(slices.map(_.size).reduceLeft(_ + _) === 99)
+    assert(slices.map(_.size).sum === 99)
     assert(slices.forall(_.isInstanceOf[NumericRange[_]]))
   }
 
@@ -209,23 +210,23 @@ class ParallelCollectionSplitSuite extends FunSuite with Checkers {
     val data = 1L to 100L
     val slices = ParallelCollectionRDD.slice(data, 3)
     assert(slices.size === 3)
-    assert(slices.map(_.size).reduceLeft(_ + _) === 100)
+    assert(slices.map(_.size).sum === 100)
     assert(slices.forall(_.isInstanceOf[NumericRange[_]]))
   }
 
   test("exclusive ranges of doubles") {
-    val data = 1.0 until 100.0 by 1.0
+    val data = Range.BigDecimal(1, 100, 1)
     val slices = ParallelCollectionRDD.slice(data, 3)
     assert(slices.size === 3)
-    assert(slices.map(_.size).reduceLeft(_ + _) === 99)
+    assert(slices.map(_.size).sum === 99)
     assert(slices.forall(_.isInstanceOf[NumericRange[_]]))
   }
 
   test("inclusive ranges of doubles") {
-    val data = 1.0 to 100.0 by 1.0
+    val data = Range.BigDecimal.inclusive(1, 100, 1)
     val slices = ParallelCollectionRDD.slice(data, 3)
     assert(slices.size === 3)
-    assert(slices.map(_.size).reduceLeft(_ + _) === 100)
+    assert(slices.map(_.size).sum === 100)
     assert(slices.forall(_.isInstanceOf[NumericRange[_]]))
   }
 

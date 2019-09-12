@@ -17,32 +17,35 @@
 
 package org.apache.spark.util
 
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch}
 
-import scala.collection.mutable
+import scala.collection.JavaConverters._
 import scala.concurrent.duration._
-import scala.language.postfixOps
 
+import org.scalatest.concurrent.{Signaler, ThreadSignaler, TimeLimits}
 import org.scalatest.concurrent.Eventually._
-import org.scalatest.concurrent.Timeouts
-import org.scalatest.FunSuite
 
-class EventLoopSuite extends FunSuite with Timeouts {
+import org.apache.spark.SparkFunSuite
+
+class EventLoopSuite extends SparkFunSuite with TimeLimits {
+
+  // Necessary to make ScalaTest 3.x interrupt a thread on the JVM like ScalaTest 2.2.x
+  implicit val defaultSignaler: Signaler = ThreadSignaler
 
   test("EventLoop") {
-    val buffer = new mutable.ArrayBuffer[Int] with mutable.SynchronizedBuffer[Int]
+    val buffer = new ConcurrentLinkedQueue[Int]
     val eventLoop = new EventLoop[Int]("test") {
 
       override def onReceive(event: Int): Unit = {
-        buffer += event
+        buffer.add(event)
       }
 
       override def onError(e: Throwable): Unit = {}
     }
     eventLoop.start()
     (1 to 100).foreach(eventLoop.post)
-    eventually(timeout(5 seconds), interval(5 millis)) {
-      assert((1 to 100) === buffer.toSeq)
+    eventually(timeout(5.seconds), interval(5.milliseconds)) {
+      assert((1 to 100) === buffer.asScala.toSeq)
     }
     eventLoop.stop()
   }
@@ -76,7 +79,7 @@ class EventLoopSuite extends FunSuite with Timeouts {
     }
     eventLoop.start()
     eventLoop.post(1)
-    eventually(timeout(5 seconds), interval(5 millis)) {
+    eventually(timeout(5.seconds), interval(5.milliseconds)) {
       assert(e === receivedError)
     }
     eventLoop.stop()
@@ -98,7 +101,7 @@ class EventLoopSuite extends FunSuite with Timeouts {
     }
     eventLoop.start()
     eventLoop.post(1)
-    eventually(timeout(5 seconds), interval(5 millis)) {
+    eventually(timeout(5.seconds), interval(5.milliseconds)) {
       assert(e === receivedError)
       assert(eventLoop.isActive)
     }
@@ -153,7 +156,7 @@ class EventLoopSuite extends FunSuite with Timeouts {
       }.start()
     }
 
-    eventually(timeout(5 seconds), interval(5 millis)) {
+    eventually(timeout(5.seconds), interval(5.milliseconds)) {
       assert(threadNum * eventsFromEachThread === receivedEventsCount)
     }
     eventLoop.stop()
@@ -178,7 +181,7 @@ class EventLoopSuite extends FunSuite with Timeouts {
     }
     eventLoop.start()
     eventLoop.post(1)
-    failAfter(5 seconds) {
+    failAfter(5.seconds) {
       // Wait until we enter `onReceive`
       onReceiveLatch.await()
       eventLoop.stop()
@@ -199,7 +202,7 @@ class EventLoopSuite extends FunSuite with Timeouts {
     }
     eventLoop.start()
     eventLoop.post(1)
-    eventually(timeout(5 seconds), interval(5 millis)) {
+    eventually(timeout(5.seconds), interval(5.milliseconds)) {
       assert(!eventLoop.isActive)
     }
   }
@@ -223,7 +226,7 @@ class EventLoopSuite extends FunSuite with Timeouts {
       }
     }
     eventLoop.start()
-    eventually(timeout(5 seconds), interval(5 millis)) {
+    eventually(timeout(5.seconds), interval(5.milliseconds)) {
       assert(!eventLoop.isActive)
     }
     assert(onStopCalled)
@@ -246,7 +249,7 @@ class EventLoopSuite extends FunSuite with Timeouts {
     }
     eventLoop.start()
     eventLoop.post(1)
-    eventually(timeout(5 seconds), interval(5 millis)) {
+    eventually(timeout(5.seconds), interval(5.milliseconds)) {
       assert(!eventLoop.isActive)
     }
     assert(onStopCalled)
@@ -270,7 +273,7 @@ class EventLoopSuite extends FunSuite with Timeouts {
     }
     eventLoop.start()
     eventLoop.post(1)
-    eventually(timeout(5 seconds), interval(5 millis)) {
+    eventually(timeout(5.seconds), interval(5.milliseconds)) {
       assert(!eventLoop.isActive)
     }
     assert(onStopCalled)

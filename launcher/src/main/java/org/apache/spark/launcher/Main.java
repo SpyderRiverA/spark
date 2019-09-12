@@ -17,6 +17,7 @@
 
 package org.apache.spark.launcher;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -32,7 +33,7 @@ class Main {
 
   /**
    * Usage: Main [class] [class args]
-   * <p/>
+   * <p>
    * This CLI works in two different modes:
    * <ul>
    *   <li>"spark-submit": if <i>class</i> is "org.apache.spark.deploy.SparkSubmit", the
@@ -42,7 +43,7 @@ class Main {
    *
    * This class works in tandem with the "bin/spark-class" script on Unix-like systems, and
    * "bin/spark-class2.cmd" batch script on Windows to execute the final command.
-   * <p/>
+   * <p>
    * On Unix-like systems, the output is a list of command arguments, separated by the NULL
    * character. On Windows, the output is a command line suitable for direct execution from the
    * script.
@@ -50,42 +51,48 @@ class Main {
   public static void main(String[] argsArray) throws Exception {
     checkArgument(argsArray.length > 0, "Not enough arguments: missing class name.");
 
-    List<String> args = new ArrayList<String>(Arrays.asList(argsArray));
+    List<String> args = new ArrayList<>(Arrays.asList(argsArray));
     String className = args.remove(0);
 
-    boolean printLaunchCommand;
-    boolean printUsage;
-    AbstractCommandBuilder builder;
-    try {
-      if (className.equals("org.apache.spark.deploy.SparkSubmit")) {
-        builder = new SparkSubmitCommandBuilder(args);
-      } else {
-        builder = new SparkClassCommandBuilder(className, args);
-      }
-      printLaunchCommand = !isEmpty(System.getenv("SPARK_PRINT_LAUNCH_COMMAND"));
-      printUsage = false;
-    } catch (IllegalArgumentException e) {
-      builder = new UsageCommandBuilder(e.getMessage());
-      printLaunchCommand = false;
-      printUsage = true;
-    }
+    boolean printLaunchCommand = !isEmpty(System.getenv("SPARK_PRINT_LAUNCH_COMMAND"));
+    Map<String, String> env = new HashMap<>();
+    List<String> cmd;
+    if (className.equals("org.apache.spark.deploy.SparkSubmit")) {
+      try {
+        AbstractCommandBuilder builder = new SparkSubmitCommandBuilder(args);
+        cmd = buildCommand(builder, env, printLaunchCommand);
+      } catch (IllegalArgumentException e) {
+        printLaunchCommand = false;
+        System.err.println("Error: " + e.getMessage());
+        System.err.println();
 
-    Map<String, String> env = new HashMap<String, String>();
-    List<String> cmd = builder.buildCommand(env);
-    if (printLaunchCommand) {
-      System.err.println("Spark Command: " + join(" ", cmd));
-      System.err.println("========================================");
+        MainClassOptionParser parser = new MainClassOptionParser();
+        try {
+          parser.parse(args);
+        } catch (Exception ignored) {
+          // Ignore parsing exceptions.
+        }
+
+        List<String> help = new ArrayList<>();
+        if (parser.className != null) {
+          help.add(parser.CLASS);
+          help.add(parser.className);
+        }
+        help.add(parser.USAGE_ERROR);
+        AbstractCommandBuilder builder = new SparkSubmitCommandBuilder(help);
+        cmd = buildCommand(builder, env, printLaunchCommand);
+      }
+    } else {
+      AbstractCommandBuilder builder = new SparkClassCommandBuilder(className, args);
+      cmd = buildCommand(builder, env, printLaunchCommand);
     }
 
     if (isWindows()) {
-      // When printing the usage message, we can't use "cmd /v" since that prevents the env
-      // variable from being seen in the caller script. So do not call prepareWindowsCommand().
-      if (printUsage) {
-        System.out.println(join(" ", cmd));
-      } else {
-        System.out.println(prepareWindowsCommand(cmd, env));
-      }
+      System.out.println(prepareWindowsCommand(cmd, env));
     } else {
+      // A sequence of NULL character and newline separates command-strings and others.
+      System.out.println('\0');
+
       // In bash, use NULL as the arg separator since it cannot be used in an argument.
       List<String> bashCmd = prepareBashCommand(cmd, env);
       for (String c : bashCmd) {
@@ -96,17 +103,30 @@ class Main {
   }
 
   /**
+   * Prepare spark commands with the appropriate command builder.
+   * If printLaunchCommand is set then the commands will be printed to the stderr.
+   */
+  private static List<String> buildCommand(
+      AbstractCommandBuilder builder,
+      Map<String, String> env,
+      boolean printLaunchCommand) throws IOException, IllegalArgumentException {
+    List<String> cmd = builder.buildCommand(env);
+    if (printLaunchCommand) {
+      System.err.println("Spark Command: " + join(" ", cmd));
+      System.err.println("========================================");
+    }
+    return cmd;
+  }
+
+  /**
    * Prepare a command line for execution from a Windows batch script.
    *
    * The method quotes all arguments so that spaces are handled as expected. Quotes within arguments
    * are "double quoted" (which is batch for escaping a quote). This page has more details about
    * quoting and other batch script fun stuff: http://ss64.com/nt/syntax-esc.html
-   *
-   * The command is executed using "cmd /c" and formatted in single line, since that's the
-   * easiest way to consume this from a batch script (see spark-class2.cmd).
    */
   private static String prepareWindowsCommand(List<String> cmd, Map<String, String> childEnv) {
-    StringBuilder cmdline = new StringBuilder("cmd /c \"");
+    StringBuilder cmdline = new StringBuilder();
     for (Map.Entry<String, String> e : childEnv.entrySet()) {
       cmdline.append(String.format("set %s=%s", e.getKey(), e.getValue()));
       cmdline.append(" && ");
@@ -115,7 +135,6 @@ class Main {
       cmdline.append(quoteForBatchScript(arg));
       cmdline.append(" ");
     }
-    cmdline.append("\"");
     return cmdline.toString();
   }
 
@@ -128,7 +147,7 @@ class Main {
       return cmd;
     }
 
-    List<String> newCmd = new ArrayList<String>();
+    List<String> newCmd = new ArrayList<>();
     newCmd.add("env");
 
     for (Map.Entry<String, String> e : childEnv.entrySet()) {
@@ -139,33 +158,30 @@ class Main {
   }
 
   /**
-   * Internal builder used when command line parsing fails. This will behave differently depending
-   * on the platform:
-   *
-   * - On Unix-like systems, it will print a call to the "usage" function with two arguments: the
-   *   the error string, and the exit code to use. The function is expected to print the command's
-   *   usage and exit with the provided exit code. The script should use "export -f usage" after
-   *   declaring a function called "usage", so that the function is available to downstream scripts.
-   *
-   * - On Windows it will set the variable "SPARK_LAUNCHER_USAGE_ERROR" to the usage error message.
-   *   The batch script should check for this variable and print its usage, since batch scripts
-   *   don't really support the "export -f" functionality used in bash.
+   * A parser used when command line parsing fails for spark-submit. It's used as a best-effort
+   * at trying to identify the class the user wanted to invoke, since that may require special
+   * usage strings (handled by SparkSubmitArguments).
    */
-  private static class UsageCommandBuilder extends AbstractCommandBuilder {
+  private static class MainClassOptionParser extends SparkSubmitOptionParser {
 
-    private final String message;
+    String className;
 
-    UsageCommandBuilder(String message) {
-      this.message = message;
+    @Override
+    protected boolean handle(String opt, String value) {
+      if (CLASS.equals(opt)) {
+        className = value;
+      }
+      return false;
     }
 
     @Override
-    public List<String> buildCommand(Map<String, String> env) {
-      if (isWindows()) {
-        return Arrays.asList("set", "SPARK_LAUNCHER_USAGE_ERROR=" + message);
-      } else {
-        return Arrays.asList("usage", message, "1");
-      }
+    protected boolean handleUnknown(String opt) {
+      return false;
+    }
+
+    @Override
+    protected void handleExtraArgs(List<String> extra) {
+
     }
 
   }

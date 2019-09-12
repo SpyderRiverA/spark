@@ -19,10 +19,9 @@ package org.apache.spark.mllib.regression
 
 import scala.util.Random
 
-import org.scalatest.FunSuite
-
+import org.apache.spark.SparkFunSuite
 import org.apache.spark.mllib.linalg.Vectors
-import org.apache.spark.mllib.util.{LocalClusterSparkContext, LinearDataGenerator,
+import org.apache.spark.mllib.util.{LinearDataGenerator, LocalClusterSparkContext,
   MLlibTestSparkContext}
 import org.apache.spark.util.Utils
 
@@ -32,7 +31,7 @@ private object LassoSuite {
   val model = new LassoModel(weights = Vectors.dense(0.1, 0.2, 0.3), intercept = 0.5)
 }
 
-class LassoSuite extends FunSuite with MLlibTestSparkContext {
+class LassoSuite extends SparkFunSuite with MLlibTestSparkContext {
 
   def validatePrediction(predictions: Seq[Double], input: Seq[LabeledPoint]) {
     val numOffPredictions = predictions.zip(input).count { case (prediction, expected) =>
@@ -56,8 +55,7 @@ class LassoSuite extends FunSuite with MLlibTestSparkContext {
     }
     val testRDD = sc.parallelize(testData, 2).cache()
 
-    val ls = new LassoWithSGD()
-    ls.optimizer.setStepSize(1.0).setRegParam(0.01).setNumIterations(40)
+    val ls = new LassoWithSGD(1.0, 40, 0.01, 1.0)
 
     val model = ls.run(testRDD)
     val weight0 = model.weights(0)
@@ -67,11 +65,12 @@ class LassoSuite extends FunSuite with MLlibTestSparkContext {
     assert(weight1 >= -1.60 && weight1 <= -1.40, weight1 + " not in [-1.6, -1.4]")
     assert(weight2 >= -1.0e-3 && weight2 <= 1.0e-3, weight2 + " not in [-0.001, 0.001]")
 
-    val validationData = LinearDataGenerator.generateLinearInput(A, Array[Double](B,C), nPoints, 17)
+    val validationData = LinearDataGenerator
+      .generateLinearInput(A, Array[Double](B, C), nPoints, 17)
       .map { case LabeledPoint(label, features) =>
       LabeledPoint(label, Vectors.dense(1.0 +: features.toArray))
     }
-    val validationRDD  = sc.parallelize(validationData, 2)
+    val validationRDD = sc.parallelize(validationData, 2)
 
     // Test prediction on RDD.
     validatePrediction(model.predict(validationRDD.map(_.features)).collect(), validationData)
@@ -99,8 +98,8 @@ class LassoSuite extends FunSuite with MLlibTestSparkContext {
 
     val testRDD = sc.parallelize(testData, 2).cache()
 
-    val ls = new LassoWithSGD()
-    ls.optimizer.setStepSize(1.0).setRegParam(0.01).setNumIterations(40)
+    val ls = new LassoWithSGD(1.0, 40, 0.01, 1.0)
+    ls.optimizer.setConvergenceTol(0.0005)
 
     val model = ls.run(testRDD, initialWeights)
     val weight0 = model.weights(0)
@@ -110,11 +109,12 @@ class LassoSuite extends FunSuite with MLlibTestSparkContext {
     assert(weight1 >= -1.60 && weight1 <= -1.40, weight1 + " not in [-1.6, -1.4]")
     assert(weight2 >= -1.0e-3 && weight2 <= 1.0e-3, weight2 + " not in [-0.001, 0.001]")
 
-    val validationData = LinearDataGenerator.generateLinearInput(A, Array[Double](B,C), nPoints, 17)
+    val validationData = LinearDataGenerator
+      .generateLinearInput(A, Array[Double](B, C), nPoints, 17)
       .map { case LabeledPoint(label, features) =>
       LabeledPoint(label, Vectors.dense(1.0 +: features.toArray))
     }
-    val validationRDD  = sc.parallelize(validationData,2)
+    val validationRDD = sc.parallelize(validationData, 2)
 
     // Test prediction on RDD.
     validatePrediction(model.predict(validationRDD.map(_.features)).collect(), validationData)
@@ -141,7 +141,7 @@ class LassoSuite extends FunSuite with MLlibTestSparkContext {
   }
 }
 
-class LassoClusterSuite extends FunSuite with LocalClusterSparkContext {
+class LassoClusterSuite extends SparkFunSuite with LocalClusterSparkContext {
 
   test("task size should be small in both training and prediction") {
     val m = 4
@@ -152,7 +152,7 @@ class LassoClusterSuite extends FunSuite with LocalClusterSparkContext {
     }.cache()
     // If we serialize data directly in the task closure, the size of the serialized task would be
     // greater than 1MB and hence Spark would throw an error.
-    val model = LassoWithSGD.train(points, 2)
+    val model = new LassoWithSGD(1.0, 2, 0.01, 1.0).run(points)
     val predictions = model.predict(points.map(_.features))
   }
 }

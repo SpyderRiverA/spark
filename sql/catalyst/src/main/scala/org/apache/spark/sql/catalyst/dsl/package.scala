@@ -20,12 +20,16 @@ package org.apache.spark.sql.catalyst
 import java.sql.{Date, Timestamp}
 
 import scala.language.implicitConversions
-import scala.reflect.runtime.universe.{TypeTag, typeTag}
 
-import org.apache.spark.sql.catalyst.analysis.{EliminateSubQueries, UnresolvedGetField, UnresolvedAttribute}
+import org.apache.spark.api.java.function.FilterFunction
+import org.apache.spark.sql.Encoder
+import org.apache.spark.sql.catalyst.analysis._
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.catalyst.expressions.aggregate._
+import org.apache.spark.sql.catalyst.expressions.objects.Invoke
 import org.apache.spark.sql.catalyst.plans.{Inner, JoinType}
+import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.catalyst.plans.logical.sql._
 import org.apache.spark.sql.types._
 
 /**
@@ -61,7 +65,7 @@ package object dsl {
   trait ImplicitOperators {
     def expr: Expression
 
-    def unary_- : Expression= UnaryMinus(expr)
+    def unary_- : Expression = UnaryMinus(expr)
     def unary_! : Predicate = Not(expr)
     def unary_~ : Expression = BitwiseNot(expr)
 
@@ -69,6 +73,7 @@ package object dsl {
     def - (other: Expression): Expression = Subtract(expr, other)
     def * (other: Expression): Expression = Multiply(expr, other)
     def / (other: Expression): Expression = Divide(expr, other)
+    def div (other: Expression): Expression = IntegralDivide(expr, other)
     def % (other: Expression): Expression = Remainder(expr, other)
     def & (other: Expression): Expression = BitwiseAnd(expr, other)
     def | (other: Expression): Expression = BitwiseOr(expr, other)
@@ -83,9 +88,15 @@ package object dsl {
     def >= (other: Expression): Predicate = GreaterThanOrEqual(expr, other)
     def === (other: Expression): Predicate = EqualTo(expr, other)
     def <=> (other: Expression): Predicate = EqualNullSafe(expr, other)
-    def !== (other: Expression): Predicate = Not(EqualTo(expr, other))
+    def =!= (other: Expression): Predicate = Not(EqualTo(expr, other))
 
-    def in(list: Expression*): Expression = In(expr, list)
+    def in(list: Expression*): Expression = list match {
+      case Seq(l: ListQuery) => expr match {
+          case c: CreateNamedStruct => InSubquery(c.valExprs, l)
+          case other => InSubquery(Seq(other), l)
+        }
+      case _ => In(expr, list)
+    }
 
     def like(other: Expression): Expression = Like(expr, other)
     def rlike(other: Expression): Expression = RLike(expr, other)
@@ -100,14 +111,22 @@ package object dsl {
     def isNull: Predicate = IsNull(expr)
     def isNotNull: Predicate = IsNotNull(expr)
 
-    def getItem(ordinal: Expression): Expression = GetItem(expr, ordinal)
-    def getField(fieldName: String): UnresolvedGetField = UnresolvedGetField(expr, fieldName)
+    def getItem(ordinal: Expression): UnresolvedExtractValue = UnresolvedExtractValue(expr, ordinal)
+    def getField(fieldName: String): UnresolvedExtractValue =
+      UnresolvedExtractValue(expr, Literal(fieldName))
 
-    def cast(to: DataType): Expression = Cast(expr, to)
+    def cast(to: DataType): Expression = {
+      if (expr.resolved && expr.dataType.sameType(to)) {
+        expr
+      } else {
+        Cast(expr, to)
+      }
+    }
 
     def asc: SortOrder = SortOrder(expr, Ascending)
+    def asc_nullsLast: SortOrder = SortOrder(expr, Ascending, NullsLast, Set.empty)
     def desc: SortOrder = SortOrder(expr, Descending)
-
+    def desc_nullsFirst: SortOrder = SortOrder(expr, Descending, NullsFirst, Set.empty)
     def as(alias: String): NamedExpression = Alias(expr, alias)()
     def as(alias: Symbol): NamedExpression = Alias(expr, alias.name)()
   }
@@ -124,7 +143,7 @@ package object dsl {
     implicit def longToLiteral(l: Long): Literal = Literal(l)
     implicit def floatToLiteral(f: Float): Literal = Literal(f)
     implicit def doubleToLiteral(d: Double): Literal = Literal(d)
-    implicit def stringToLiteral(s: String): Literal = Literal(s)
+    implicit def stringToLiteral(s: String): Literal = Literal.create(s, StringType)
     implicit def dateToLiteral(d: Date): Literal = Literal(d)
     implicit def bigDecimalToLiteral(d: BigDecimal): Literal = Literal(d.underlying())
     implicit def bigDecimalToLiteral(d: java.math.BigDecimal): Literal = Literal(d)
@@ -140,25 +159,54 @@ package object dsl {
       // Note that if we make ExpressionConversions an object rather than a trait, we can
       // then make this a value class to avoid the small penalty of runtime instantiation.
       def $(args: Any*): analysis.UnresolvedAttribute = {
-        analysis.UnresolvedAttribute(sc.s(args :_*))
+        analysis.UnresolvedAttribute(sc.s(args : _*))
       }
     }
 
-    def sum(e: Expression): Expression = Sum(e)
-    def sumDistinct(e: Expression): Expression = SumDistinct(e)
-    def count(e: Expression): Expression = Count(e)
-    def countDistinct(e: Expression*): Expression = CountDistinct(e)
+    def rand(e: Long): Expression = Rand(e)
+    def sum(e: Expression): Expression = Sum(e).toAggregateExpression()
+    def sumDistinct(e: Expression): Expression = Sum(e).toAggregateExpression(isDistinct = true)
+    def count(e: Expression): Expression = Count(e).toAggregateExpression()
+    def countDistinct(e: Expression*): Expression =
+      Count(e).toAggregateExpression(isDistinct = true)
     def approxCountDistinct(e: Expression, rsd: Double = 0.05): Expression =
-      ApproxCountDistinct(e, rsd)
-    def avg(e: Expression): Expression = Average(e)
-    def first(e: Expression): Expression = First(e)
-    def last(e: Expression): Expression = Last(e)
-    def min(e: Expression): Expression = Min(e)
-    def max(e: Expression): Expression = Max(e)
+      HyperLogLogPlusPlus(e, rsd).toAggregateExpression()
+    def avg(e: Expression): Expression = Average(e).toAggregateExpression()
+    def first(e: Expression): Expression = new First(e).toAggregateExpression()
+    def last(e: Expression): Expression = new Last(e).toAggregateExpression()
+    def min(e: Expression): Expression = Min(e).toAggregateExpression()
+    def minDistinct(e: Expression): Expression = Min(e).toAggregateExpression(isDistinct = true)
+    def max(e: Expression): Expression = Max(e).toAggregateExpression()
+    def maxDistinct(e: Expression): Expression = Max(e).toAggregateExpression(isDistinct = true)
     def upper(e: Expression): Expression = Upper(e)
     def lower(e: Expression): Expression = Lower(e)
+    def coalesce(args: Expression*): Expression = Coalesce(args)
+    def greatest(args: Expression*): Expression = Greatest(args)
+    def least(args: Expression*): Expression = Least(args)
     def sqrt(e: Expression): Expression = Sqrt(e)
     def abs(e: Expression): Expression = Abs(e)
+    def star(names: String*): Expression = names match {
+      case Seq() => UnresolvedStar(None)
+      case target => UnresolvedStar(Option(target))
+    }
+    def namedStruct(e: Expression*): Expression = CreateNamedStruct(e)
+
+    def callFunction[T, U](
+        func: T => U,
+        returnType: DataType,
+        argument: Expression): Expression = {
+      val function = Literal.create(func, ObjectType(classOf[T => U]))
+      Invoke(function, "apply", returnType, argument :: Nil)
+    }
+
+    def windowSpec(
+        partitionSpec: Seq[Expression],
+        orderSpec: Seq[SortOrder],
+        frame: WindowFrame): WindowSpecDefinition =
+      WindowSpecDefinition(partitionSpec, orderSpec, frame)
+
+    def windowExpr(windowFunc: Expression, windowSpec: WindowSpecDefinition): WindowExpression =
+      WindowExpression(windowFunc, windowSpec)
 
     implicit class DslSymbol(sym: Symbol) extends ImplicitAttribute { def s: String = sym.name }
     // TODO more implicit class for literal?
@@ -201,7 +249,7 @@ package object dsl {
 
       /** Creates a new AttributeReference of type decimal */
       def decimal: AttributeReference =
-        AttributeReference(s, DecimalType.Unlimited, nullable = true)()
+        AttributeReference(s, DecimalType.SYSTEM_DEFAULT, nullable = true)()
 
       /** Creates a new AttributeReference of type decimal */
       def decimal(precision: Int, scale: Int): AttributeReference =
@@ -217,6 +265,9 @@ package object dsl {
       def array(dataType: DataType): AttributeReference =
         AttributeReference(s, ArrayType(dataType), nullable = true)()
 
+      def array(arrayType: ArrayType): AttributeReference =
+        AttributeReference(s, arrayType)()
+
       /** Creates a new AttributeReference of type map */
       def map(keyType: DataType, valueType: DataType): AttributeReference =
         map(MapType(keyType, valueType))
@@ -225,142 +276,141 @@ package object dsl {
         AttributeReference(s, mapType, nullable = true)()
 
       /** Creates a new AttributeReference of type struct */
-      def struct(fields: StructField*): AttributeReference = struct(StructType(fields))
       def struct(structType: StructType): AttributeReference =
         AttributeReference(s, structType, nullable = true)()
+      def struct(attrs: AttributeReference*): AttributeReference =
+        struct(StructType.fromAttributes(attrs))
+
+      /** Creates a new AttributeReference of object type */
+      def obj(cls: Class[_]): AttributeReference =
+        AttributeReference(s, ObjectType(cls), nullable = true)()
+
+      /** Create a function. */
+      def function(exprs: Expression*): UnresolvedFunction =
+        UnresolvedFunction(s, exprs, isDistinct = false)
+      def distinctFunction(exprs: Expression*): UnresolvedFunction =
+        UnresolvedFunction(s, exprs, isDistinct = true)
     }
 
     implicit class DslAttribute(a: AttributeReference) {
       def notNull: AttributeReference = a.withNullability(false)
-      def nullable: AttributeReference = a.withNullability(true)
-
-      // Protobuf terminology
-      def required: AttributeReference = a.withNullability(false)
-
+      def canBeNull: AttributeReference = a.withNullability(true)
       def at(ordinal: Int): BoundReference = BoundReference(ordinal, a.dataType, a.nullable)
     }
   }
 
-
   object expressions extends ExpressionConversions  // scalastyle:ignore
 
-  abstract class LogicalPlanFunctions {
-    def logicalPlan: LogicalPlan
+  object plans {  // scalastyle:ignore
+    def table(parts: String*): LogicalPlan = UnresolvedRelation(parts)
 
-    def select(exprs: NamedExpression*): LogicalPlan = Project(exprs, logicalPlan)
+    implicit class DslLogicalPlan(val logicalPlan: LogicalPlan) {
+      def select(exprs: Expression*): LogicalPlan = {
+        val namedExpressions = exprs.map {
+          case e: NamedExpression => e
+          case e => UnresolvedAlias(e)
+        }
+        Project(namedExpressions, logicalPlan)
+      }
 
-    def where(condition: Expression): LogicalPlan = Filter(condition, logicalPlan)
+      def where(condition: Expression): LogicalPlan = Filter(condition, logicalPlan)
 
-    def limit(limitExpr: Expression): LogicalPlan = Limit(limitExpr, logicalPlan)
+      def filter[T : Encoder](func: T => Boolean): LogicalPlan = TypedFilter(func, logicalPlan)
 
-    def join(
+      def filter[T : Encoder](func: FilterFunction[T]): LogicalPlan = TypedFilter(func, logicalPlan)
+
+      def serialize[T : Encoder]: LogicalPlan = CatalystSerde.serialize[T](logicalPlan)
+
+      def deserialize[T : Encoder]: LogicalPlan = CatalystSerde.deserialize[T](logicalPlan)
+
+      def limit(limitExpr: Expression): LogicalPlan = Limit(limitExpr, logicalPlan)
+
+      def join(
         otherPlan: LogicalPlan,
         joinType: JoinType = Inner,
         condition: Option[Expression] = None): LogicalPlan =
-      Join(logicalPlan, otherPlan, joinType, condition)
+        Join(logicalPlan, otherPlan, joinType, condition, JoinHint.NONE)
 
-    def orderBy(sortExprs: SortOrder*): LogicalPlan = Sort(sortExprs, true, logicalPlan)
-
-    def sortBy(sortExprs: SortOrder*): LogicalPlan = Sort(sortExprs, false, logicalPlan)
-
-    def groupBy(groupingExprs: Expression*)(aggregateExprs: Expression*): LogicalPlan = {
-      val aliasedExprs = aggregateExprs.map {
-        case ne: NamedExpression => ne
-        case e => Alias(e, e.toString)()
+      def cogroup[Key: Encoder, Left: Encoder, Right: Encoder, Result: Encoder](
+          otherPlan: LogicalPlan,
+          func: (Key, Iterator[Left], Iterator[Right]) => TraversableOnce[Result],
+          leftGroup: Seq[Attribute],
+          rightGroup: Seq[Attribute],
+          leftAttr: Seq[Attribute],
+          rightAttr: Seq[Attribute]
+        ): LogicalPlan = {
+        CoGroup.apply[Key, Left, Right, Result](
+          func,
+          leftGroup,
+          rightGroup,
+          leftAttr,
+          rightAttr,
+          logicalPlan,
+          otherPlan)
       }
-      Aggregate(groupingExprs, aliasedExprs, logicalPlan)
-    }
 
-    def subquery(alias: Symbol): LogicalPlan = Subquery(alias.name, logicalPlan)
+      def orderBy(sortExprs: SortOrder*): LogicalPlan = Sort(sortExprs, true, logicalPlan)
 
-    def unionAll(otherPlan: LogicalPlan): LogicalPlan = Union(logicalPlan, otherPlan)
+      def sortBy(sortExprs: SortOrder*): LogicalPlan = Sort(sortExprs, false, logicalPlan)
 
-    def sfilter[T1](arg1: Symbol)(udf: (T1) => Boolean): LogicalPlan =
-      Filter(ScalaUdf(udf, BooleanType, Seq(UnresolvedAttribute(arg1.name))), logicalPlan)
+      def groupBy(groupingExprs: Expression*)(aggregateExprs: Expression*): LogicalPlan = {
+        val aliasedExprs = aggregateExprs.map {
+          case ne: NamedExpression => ne
+          case e => Alias(e, e.toString)()
+        }
+        Aggregate(groupingExprs, aliasedExprs, logicalPlan)
+      }
 
-    def sample(
-        fraction: Double,
-        withReplacement: Boolean = true,
-        seed: Int = (math.random * 1000).toInt): LogicalPlan =
-      Sample(fraction, withReplacement, seed, logicalPlan)
+      def window(
+          windowExpressions: Seq[NamedExpression],
+          partitionSpec: Seq[Expression],
+          orderSpec: Seq[SortOrder]): LogicalPlan =
+        Window(windowExpressions, partitionSpec, orderSpec, logicalPlan)
 
-    def generate(
+      def subquery(alias: Symbol): LogicalPlan = SubqueryAlias(alias.name, logicalPlan)
+
+      def except(otherPlan: LogicalPlan, isAll: Boolean): LogicalPlan =
+        Except(logicalPlan, otherPlan, isAll)
+
+      def intersect(otherPlan: LogicalPlan, isAll: Boolean): LogicalPlan =
+        Intersect(logicalPlan, otherPlan, isAll)
+
+      def union(otherPlan: LogicalPlan): LogicalPlan = Union(logicalPlan, otherPlan)
+
+      def generate(
         generator: Generator,
-        join: Boolean = false,
+        unrequiredChildIndex: Seq[Int] = Nil,
         outer: Boolean = false,
-        alias: Option[String] = None): LogicalPlan =
-      Generate(generator, join, outer, None, logicalPlan)
+        alias: Option[String] = None,
+        outputNames: Seq[String] = Nil): LogicalPlan =
+        Generate(generator, unrequiredChildIndex, outer,
+          alias, outputNames.map(UnresolvedAttribute(_)), logicalPlan)
 
-    def insertInto(tableName: String, overwrite: Boolean = false): LogicalPlan =
-      InsertIntoTable(
-        analysis.UnresolvedRelation(Seq(tableName)), Map.empty, logicalPlan, overwrite)
+      def insertInto(tableName: String): LogicalPlan = insertInto(table(tableName))
 
-    def analyze: LogicalPlan = EliminateSubQueries(analysis.SimpleAnalyzer(logicalPlan))
-  }
+      def insertInto(
+          table: LogicalPlan,
+          partition: Map[String, Option[String]] = Map.empty,
+          overwrite: Boolean = false,
+          ifPartitionNotExists: Boolean = false): LogicalPlan =
+        InsertIntoStatement(table, partition, logicalPlan, overwrite, ifPartitionNotExists)
 
-  object plans {  // scalastyle:ignore
-    implicit class DslLogicalPlan(val logicalPlan: LogicalPlan) extends LogicalPlanFunctions {
-      def writeToFile(path: String): LogicalPlan = WriteToFile(path, logicalPlan)
+      def as(alias: String): LogicalPlan = SubqueryAlias(alias, logicalPlan)
+
+      def coalesce(num: Integer): LogicalPlan =
+        Repartition(num, shuffle = false, logicalPlan)
+
+      def repartition(num: Integer): LogicalPlan =
+        Repartition(num, shuffle = true, logicalPlan)
+
+      def distribute(exprs: Expression*)(n: Int): LogicalPlan =
+        RepartitionByExpression(exprs, logicalPlan, numPartitions = n)
+
+      def analyze: LogicalPlan =
+        EliminateSubqueryAliases(analysis.SimpleAnalyzer.execute(logicalPlan))
+
+      def hint(name: String, parameters: Any*): LogicalPlan =
+        UnresolvedHint(name, parameters, logicalPlan)
     }
   }
-
-  case class ScalaUdfBuilder[T: TypeTag](f: AnyRef) {
-    def call(args: Expression*): ScalaUdf = {
-      ScalaUdf(f, ScalaReflection.schemaFor(typeTag[T]).dataType, args)
-    }
-  }
-
-  // scalastyle:off
-  /** functionToUdfBuilder 1-22 were generated by this script
-
-    (1 to 22).map { x =>
-      val argTypes = Seq.fill(x)("_").mkString(", ")
-      s"implicit def functionToUdfBuilder[T: TypeTag](func: Function$x[$argTypes, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)"
-    }
-  */
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function1[_, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function2[_, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function3[_, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function4[_, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function5[_, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function6[_, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function7[_, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function8[_, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function9[_, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function10[_, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function11[_, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function12[_, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function13[_, _, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function14[_, _, _, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function15[_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function16[_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function17[_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function18[_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function19[_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function20[_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function21[_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-
-  implicit def functionToUdfBuilder[T: TypeTag](func: Function22[_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, T]): ScalaUdfBuilder[T] = ScalaUdfBuilder(func)
-  // scalastyle:on
 }

@@ -26,11 +26,25 @@
 # NOTE(shivaram): Right now we use $SPARK_HOME/R/lib to be the installation directory
 # to load the SparkR package on the worker nodes.
 
+set -o pipefail
+set -e
+set -x
 
-FWDIR="$(cd `dirname $0`; pwd)"
+FWDIR="$(cd "`dirname "${BASH_SOURCE[0]}"`"; pwd)"
 LIB_DIR="$FWDIR/lib"
 
-mkdir -p $LIB_DIR
+mkdir -p "$LIB_DIR"
 
-# Install R
-R CMD INSTALL --library=$LIB_DIR $FWDIR/pkg/
+pushd "$FWDIR" > /dev/null
+. "$FWDIR/find-r.sh"
+
+. "$FWDIR/create-rd.sh"
+
+# Install SparkR to $LIB_DIR
+"$R_SCRIPT_PATH/R" CMD INSTALL --library="$LIB_DIR" "$FWDIR/pkg/"
+
+# Zip the SparkR package so that it can be distributed to worker nodes on YARN
+cd "$LIB_DIR"
+jar cfM "$LIB_DIR/sparkr.zip" SparkR
+
+popd > /dev/null

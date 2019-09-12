@@ -17,13 +17,16 @@ rem See the License for the specific language governing permissions and
 rem limitations under the License.
 rem
 
-set SPARK_HOME=%~dp0..
+rem Figure out where the Spark framework is installed
+call "%~dp0find-spark-home.cmd"
 
-echo "%*" | findstr " --help -h" >nul
-if %ERRORLEVEL% equ 0 (
-  call :usage
-  exit /b 0
-)
+set LF=^
+
+
+rem two empty lines are required
+set _SPARK_CMD_USAGE=Usage: .\bin\spark-shell.cmd [options]^%LF%%LF%^%LF%%LF%^
+Scala REPL options:^%LF%%LF%^
+  -I ^<file^>                   preload ^<file^>, enforcing line-by-line interpretation
 
 rem SPARK-4161: scala does not assume use of the java classpath,
 rem so we need to add the "-Dscala.usejavacp=true" flag manually. We
@@ -37,16 +40,4 @@ if "x%SPARK_SUBMIT_OPTS%"=="x" (
 set SPARK_SUBMIT_OPTS="%SPARK_SUBMIT_OPTS% -Dscala.usejavacp=true"
 
 :run_shell
-call %SPARK_HOME%\bin\spark-submit2.cmd --class org.apache.spark.repl.Main %*
-set SPARK_ERROR_LEVEL=%ERRORLEVEL%
-if not "x%SPARK_LAUNCHER_USAGE_ERROR%"=="x" (
-  call :usage
-  exit /b 1
-)
-exit /b %SPARK_ERROR_LEVEL%
-
-:usage
-echo %SPARK_LAUNCHER_USAGE_ERROR%
-echo "Usage: .\bin\spark-shell.cmd [options]" >&2
-call %SPARK_HOME%\bin\spark-submit2.cmd --help 2>&1 | findstr /V "Usage" 1>&2
-goto :eof
+"%SPARK_HOME%\bin\spark-submit2.cmd" --class org.apache.spark.repl.Main --name "Spark shell" %*

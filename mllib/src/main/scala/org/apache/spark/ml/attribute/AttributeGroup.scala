@@ -19,10 +19,12 @@ package org.apache.spark.ml.attribute
 
 import scala.collection.mutable.ArrayBuffer
 
-import org.apache.spark.mllib.linalg.VectorUDT
+import org.apache.spark.annotation.DeveloperApi
+import org.apache.spark.ml.linalg.VectorUDT
 import org.apache.spark.sql.types.{Metadata, MetadataBuilder, StructField}
 
 /**
+ * :: DeveloperApi ::
  * Attributes that describe a vector ML column.
  *
  * @param name name of the attribute group (the ML column name)
@@ -31,6 +33,7 @@ import org.apache.spark.sql.types.{Metadata, MetadataBuilder, StructField}
  * @param attrs optional array of attributes. Attribute will be copied with their corresponding
  *              indices in the array.
  */
+@DeveloperApi
 class AttributeGroup private (
     val name: String,
     val numAttributes: Option[Int],
@@ -117,12 +120,13 @@ class AttributeGroup private (
         case numeric: NumericAttribute =>
           // Skip default numeric attributes.
           if (numeric.withoutIndex != NumericAttribute.defaultAttr) {
-            numericMetadata += numeric.toMetadata(withType = false)
+            numericMetadata += numeric.toMetadataImpl(withType = false)
           }
         case nominal: NominalAttribute =>
-          nominalMetadata += nominal.toMetadata(withType = false)
+          nominalMetadata += nominal.toMetadataImpl(withType = false)
         case binary: BinaryAttribute =>
-          binaryMetadata += binary.toMetadata(withType = false)
+          binaryMetadata += binary.toMetadataImpl(withType = false)
+        case UnresolvedAttribute =>
       }
       val attrBldr = new MetadataBuilder
       if (numericMetadata.nonEmpty) {
@@ -151,7 +155,7 @@ class AttributeGroup private (
   }
 
   /** Converts to ML metadata */
-  def toMetadata: Metadata = toMetadata(Metadata.empty)
+  def toMetadata(): Metadata = toMetadata(Metadata.empty)
 
   /** Converts to a StructField with some existing metadata. */
   def toStructField(existingMetadata: Metadata): StructField = {
@@ -159,7 +163,7 @@ class AttributeGroup private (
   }
 
   /** Converts to a StructField. */
-  def toStructField: StructField = toStructField(Metadata.empty)
+  def toStructField(): StructField = toStructField(Metadata.empty)
 
   override def equals(other: Any): Boolean = {
     other match {
@@ -179,9 +183,15 @@ class AttributeGroup private (
     sum = 37 * sum + attributes.map(_.toSeq).hashCode
     sum
   }
+
+  override def toString: String = toMetadata.toString
 }
 
-/** Factory methods to create attribute groups. */
+/**
+ * :: DeveloperApi ::
+ * Factory methods to create attribute groups.
+ */
+@DeveloperApi
 object AttributeGroup {
 
   import AttributeKeys._
@@ -229,7 +239,9 @@ object AttributeGroup {
     }
   }
 
-  /** Creates an attribute group from a [[StructField]] instance. */
+  /**
+   * Creates an attribute group from a `StructField` instance.
+   */
   def fromStructField(field: StructField): AttributeGroup = {
     require(field.dataType == new VectorUDT)
     if (field.metadata.contains(ML_ATTR)) {
